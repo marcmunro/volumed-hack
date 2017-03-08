@@ -1,0 +1,8 @@
+# Ignore backup and temp files
+*~
+\#*#
+\.\#*
+
+# The db directory
+db/*
+
