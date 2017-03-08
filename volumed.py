@@ -67,6 +67,9 @@ class Conduit:
     def write(self, str):
         self.outstream.write(str)
 
+    def close(self):
+        print "CLOSING SOCKET TO %s" % self
+        
 class ThreadPlus(threading.Thread):
     """Thread with added stop, sleep and sleep_target manipulation
     methods."""
@@ -114,15 +117,20 @@ class VolumeController(ThreadPlus):
         self.hw_interface = hw_interface
         self.db = db
         self.queue = Queue.Queue()
-        self.last_dequeued = None
         self.volume_re = re.compile("^ *Vol *([+-])?([0-9]*) *$",
                                     re.IGNORECASE)
         self.mute_re = re.compile("^ *(Un)?Mute *$", re.IGNORECASE)
         self.quit_re = re.compile("^ *q(uit)? *$", re.IGNORECASE)
         self.start()
 
-    def put (self, payload):
+    def put(self, payload):
+        #print "Put: %s\n" % (payload,)
         self.queue.put(payload)
+        
+    def get(self, *args):
+        res = self.queue.get(*args)
+        #print "Get: %s\n" % (res,)
+        return res
         
     def parse_item(self, item):
         match = self.volume_re.match(item)
@@ -173,76 +181,90 @@ class VolumeController(ThreadPlus):
         if self.db.mute == '0':
             self.hw_interface.set_volume(vol)
             self.monitor.set_volume(vol)
-        
-    def process_items(self, conduit, items):
+
+    def add_conduit(self, current, conduit):
+        if conduit in current:
+            current[conduit] += 1
+        else:
+            current[conduit] = 1
+        return current
+
+    def send(self, conduits, msg):
+        for conduit in conduits:
+            if msg:
+                conduit.write("TO_CONDUIT(%s): %s" % (conduit, msg))
+            else:
+                conduit.close()
+    
+    def process_requests(self, items):
         """This combines a stream of possibly related commands in items
         into grouped get and/or set operations.  This means that a
-        fast stream of vol +1 commands will likely be concatebated
+        fast stream of vol +1 commands will likely be concatenated
         into a single vol +N command.  The point of this is to improve
-        responsiveness to things such as remote controls.
-        TODO:  be smarter about merging commands from multiple
-        conduits."""
+        responsiveness to things such as remote controls."""
 
         self.monitor.reset_wait()   # No point in fetching current volume any
                                     # time soon.
         vol = self.monitor.volume()
         set = False
+        setters = {}
         get = False
+        getters = {}
         mute = False
+        muters = {}
         unmute = False
+        unmuters = {}
         quit = False
-        for item in items:
+        quiters = {}
+        for conduit, item in items:
             cmd, val = self.parse_item(item)
             if cmd:
                 if cmd == 'get':
                     get = True
+                    getters = self.add_conduit(getters, conduit)
                 elif cmd == 'set':
                     set = True
                     vol = val
+                    setters = self.add_conduit(setters, conduit)
                 elif cmd == 'delta':
                     set = True
                     vol += val
+                    setters = self.add_conduit(setters, conduit)
                 elif cmd == 'mute':
                     mute = True 
                     unmute = False
+                    muters = self.add_conduit(muters, conduit)
                 elif cmd == 'unmute':
                     unmute = True 
                     mute = False
+                    unmuters = self.add_conduit(unmuters, conduit)
                 elif cmd == 'quit':
                     quit = True
+                    quiters = self.add_conduit(quiters, conduit)
                     break
         if mute:
             self.set_mute()
-            conduit.write("Muted\n")
+            self.send(muters, "Muted\n")
         if set:
             self.set_volume(vol)
-            conduit.write("Vol: %d\n" % self.monitor.last_volume)
+            self.send(setters, "Vol: %d\n" % self.monitor.last_volume)
         if unmute:
             self.set_unmute()
-            conduit.write("Unmuted\n")
+            self.send(unmuters, "Unmuted\n")
         if get:
-            conduit.write("Vol: %d\n" % self.monitor.last_volume)
+            self.send(getters, "Vol: %d\n" % self.monitor.last_volume)
         if quit:
+            self.send(quiters, None)
             self.stop()
     
-    def get_items(self):
-        """Compile a list of related requests (all coming from the same
-        conduit) and return the conduit and the list.  The conduit will
-        provide the means to provide any needed feedback back to the
-        requester."""
-        if self.last_dequeued:
-            conduit, item = self.last_dequeued
-            self.last_dequeued = None
-        else:
-            conduit, item = self.queue.get()
-        items = [item]
+    def get_requests(self):
+        """Compile all outstanding requests into a single list to
+        process.  Each list entry is a tuple of the form: (conduit,
+        request_string)"""
+        requests = [self.get()]
         while not self.queue.empty():
-            this_conduit, item = self.queue.get(False)
-            if this_conduit != conduit:
-                self.last_dequeued = (conduit, item)
-                break
-            items.append(item)
-        return conduit, items
+            requests.append(self.get(False))
+        return requests
 
     def run(self):
         # This is where we asynchronously parse and process commands
@@ -251,8 +273,8 @@ class VolumeController(ThreadPlus):
         # with regard to our command stream.  IE, we only process the
         # queue once any previous command has been completely processed.
         while self.running:
-            conduit, items = self.get_items()
-            self.process_items(conduit, items)
+            requests = self.get_requests()
+            self.process_requests(requests)
             
 class Monitor(ThreadPlus):
     RESOLUTION = 2.0
@@ -445,7 +467,7 @@ v = VolumeController(monitor, interface, db)
 while v.running:
     res = instream.readline()
     if res == "":
-        v.stop()
+        break
     else:
         v.put((conduit, res.strip()))
 v.join()
