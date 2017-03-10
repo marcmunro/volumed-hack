@@ -20,8 +20,6 @@
 #
 
 # TODO:
-# Read volume from amixer/mpc
-# Set volume using amixer/mpc
 # Update vol.php and vol.sh to use this
 # Move handling of logarithmic volume control into here from javascript
 # Modify javascript to be more responsive
@@ -34,6 +32,7 @@ import time
 import Queue
 import re
 import sqlite3
+import subprocess
 
 def usage(msg):
     sys.stderr.write("ERROR: %s\n\n" % msg)
@@ -170,20 +169,25 @@ class VolumeController(ThreadPlus):
                     cmd = 'shutdown'
                     
         print "CMD: %s, VAL: %s (request: \"%s\")" % (cmd, val, request)
-
         return (cmd, val)
 
     def set_mute(self):
+        self.monitor.reset_wait()   # No point in fetching current volume any
+                                    # time soon.
         self.db.mute = '1'
         self.hw_interface.set_volume(0)
     
     def set_unmute(self):
+        self.monitor.reset_wait()   # No point in fetching current volume any
+                                    # time soon.
         level = int(self.db.level)
         self.hw_interface.set_volume(level)
         self.monitor.set_volume(level)
         self.db.mute = '0'
     
     def set_volume(self, vol):
+        self.monitor.reset_wait()   # No point in fetching current volume any
+                                    # time soon.
         warn_level = int(self.db.warning_level)
         if vol < 0:
             vol = 0
@@ -314,7 +318,7 @@ class Monitor(ThreadPlus):
     def set_volume(self, volume):
         """Update the volume if it has changed.  Note that this may
         safely  be called asynchronously."""
-        if (volume == 0) and (self.db.mute == '0'):
+        if (volume == 0) and (self.db.mute == '1'):
             return # Do not update our record of the desired volume
 
         with self.volume_lock:
@@ -341,6 +345,7 @@ class HWInterface:
 
     def __init__(self, db):
         self.db = db
+        self.pct_re = re.compile("([0-9]+)?[^0-9]*([0-9]+)%")
         self.cardnum = self.get_cardnum()
 
     def get_cardnum(self):
@@ -352,27 +357,56 @@ class HWInterface:
             open("/proc/asound/card1/id")
             return 1
         except IOError:
-            return 2
+            return 0
         
     def volume(self):
-        with open("./voltmp") as f:
-            print "TODO: READ HW VOLUME"
-            return int(f.read().strip())
+        if self.db.mpd_mixer == 'hardware':
+            if self.db.volcurve == 'Yes':
+                cmd = ("amixer -c %d sget %s -M" %
+                       (self.cardnum, self.db.alsa_mixer))
+            else:
+                cmd = ("amixer -c %d sget %s" %
+                       (self.cardnum, self.db.alsa_mixer))
+        else:
+            cmd = "mpc"
+
+        # TODO: Put in some error handling here    
+        out = subprocess.check_output(cmd.split(' '))
+        match = self.pct_re.search(out)
+        return int(match.group(2))
 
     def set_volume(self, volume):
         if self.db.mpd_mixer == 'hardware':
             if self.db.volcurve == 'Yes':
-                cmd = ("amixer -c %d sset %s -M%d%%" %
+                cmd = ("amixer -c %d sset %s -M% d%%" %
                        (self.cardnum, self.db.alsa_mixer, volume))
             else:
                 cmd = ("amixer -c %d sset %s %d%%" %
                        (self.cardnum, self.db.alsa_mixer, volume))
         else:
             cmd = "mpc volume %d" % volume
-        print "CMD: %s" % cmd
+
+        # TODO: log the following?
+        out = subprocess.check_output(cmd.split(' '))
+        match = self.pct_re.search(out)
+        result = int(match.group(2))
+        if result != volume:
+            # We have a discrepency between what we requested and what
+            # we got.
+            if match.group(1):
+                # We have an actual value as well as a pct.  Let's
+                # try incrementing or decrementing it.
+                actual = int(match.group(1))
+                if result < volume:
+                    actual += 1
+                else:
+                    actual -= 1
+                if self.db.mpd_mixer == 'hardware':
+                    cmd = ("amixer -c %d sset %s %d" %
+                           (self.cardnum, self.db.alsa_mixer, actual))
+                    out = subprocess.check_output(cmd.split(' '))
+                    
         
-        time.sleep(2)
-                
 class DB(ThreadPlus):
     """Provide a nice simple setter/getter interface to the database
     fields, and allow it to be done with threads."""
@@ -493,7 +527,9 @@ class Interlocutor(threading.Thread):
 
     def close(self):
         if self.running:
-            self.socket.shutdown(socket.SHUT_RD)
+            try:
+                self.socket.shutdown(socket.SHUT_RD)
+            except: pass # Nothing much to do if we get an error here.
             self.running = False
 
     def shutdown(self):

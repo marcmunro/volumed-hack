@@ -86,6 +86,8 @@ if __name__ == '__main__':
         
     r = Receiver(s)
     send(s, "%s\n" % options.command)
-    send(s, "q\n")
+    try:
+        send(s, "q\n")
+    except: pass  # Keep this quiet in case we had sent a shutdown.
     r.join()
     s.close()
