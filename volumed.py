@@ -17,16 +17,15 @@
 # Responsive volume manager for Moode Audio Player.
 #
 # (C) Marc Munro 2017
-# Tim, if you would like, I will assign the copyright to you.
 #
 
 # TODO:
 # Read volume from amixer/mpc
 # Set volume using amixer/mpc
-# Test with named pipes
 # Update vol.php and vol.sh to use this
 # Move handling of logarithmic volume control into here from javascript
 # Modify javascript to be more responsive
+# daemonify
 
 import sys
 import os
@@ -101,6 +100,7 @@ class ThreadPlus(threading.Thread):
         self.set_sleep_target(now + sleep_time)
         
         while self.running:
+            # sys.stdout.flush() # Useful when tee-ing the output for debug
             tick = min(now + ThreadPlus.RESOLUTION, self.target())
             time.sleep(tick - now)
             now = time.time()
@@ -117,12 +117,20 @@ class VolumeController(ThreadPlus):
         self.hw_interface = hw_interface
         self.db = db
         self.queue = Queue.Queue()
-        self.volume_re = re.compile("^ *Vol *([+-])?([0-9]*) *$",
+        self.volume_re = re.compile("^ *vol *([+-])?([0-9]*) *$",
                                     re.IGNORECASE)
         self.mute_re = re.compile("^ *(Un)?Mute *$", re.IGNORECASE)
         self.quit_re = re.compile("^ *q(uit)? *$", re.IGNORECASE)
+        self.shutdown_re = re.compile("^ *shutdown *$", re.IGNORECASE)
         self.start()
 
+    def stop(self):
+        super(VolumeController, self).stop()
+        self.monitor.stop()
+        self.db.stop()
+        self.db.join()
+        self.monitor.stop()
+        
     def put(self, payload):
         #print "Put: %s\n" % (payload,)
         self.queue.put(payload)
@@ -132,8 +140,8 @@ class VolumeController(ThreadPlus):
         #print "Get: %s\n" % (res,)
         return res
         
-    def parse_item(self, item):
-        match = self.volume_re.match(item)
+    def parse_request(self, request):
+        match = self.volume_re.match(request)
         cmd, val = None, None
         if match:
             if match.group(2):
@@ -148,7 +156,7 @@ class VolumeController(ThreadPlus):
                 else:
                     cmd = 'get'
         else:
-            match = self.mute_re.match(item)
+            match = self.mute_re.match(request)
             if match:
                 val = 0
                 if match.group(1):
@@ -156,10 +164,13 @@ class VolumeController(ThreadPlus):
                 else:
                     cmd = 'mute'
             else:
-                if self.quit_re.match(item):
+                if self.quit_re.match(request):
                     cmd = 'quit'
+                elif self.shutdown_re.match(request):
+                    cmd = 'shutdown'
                     
-        print "CMD: %s, VAL: %s (item: \"%s\")" % (cmd, val, item)            
+        print "CMD: %s, VAL: %s (request: \"%s\")" % (cmd, val, request)
+
         return (cmd, val)
 
     def set_mute(self):
@@ -192,12 +203,12 @@ class VolumeController(ThreadPlus):
     def send(self, conduits, msg):
         for conduit in conduits:
             if msg:
-                conduit.write("TO_CONDUIT(%s): %s" % (conduit, msg))
+                conduit.write(msg)
             else:
                 conduit.close()
     
-    def process_requests(self, items):
-        """This combines a stream of possibly related commands in items
+    def process_requests(self, requests):
+        """This combines a stream of possibly related commands in requests
         into grouped get and/or set operations.  This means that a
         fast stream of vol +1 commands will likely be concatenated
         into a single vol +N command.  The point of this is to improve
@@ -215,9 +226,9 @@ class VolumeController(ThreadPlus):
         unmute = False
         unmuters = {}
         quit = False
-        quiters = {}
-        for conduit, item in items:
-            cmd, val = self.parse_item(item)
+        quitters = {}
+        for conduit, request in requests:
+            cmd, val = self.parse_request(request)
             if cmd:
                 if cmd == 'get':
                     get = True
@@ -240,8 +251,11 @@ class VolumeController(ThreadPlus):
                     unmuters = self.add_conduit(unmuters, conduit)
                 elif cmd == 'quit':
                     quit = True
-                    quiters = self.add_conduit(quiters, conduit)
-                    break
+                    quitters = self.add_conduit(quitters, conduit)
+                elif cmd == 'shutdown':
+                    conduit.shutdown()
+                    self.stop()
+                    return
         if mute:
             self.set_mute()
             self.send(muters, "Muted\n")
@@ -254,8 +268,7 @@ class VolumeController(ThreadPlus):
         if get:
             self.send(getters, "Vol: %d\n" % self.monitor.last_volume)
         if quit:
-            self.send(quiters, None)
-            self.stop()
+            self.send(quitters, None)
     
     def get_requests(self):
         """Compile all outstanding requests into a single list to
@@ -442,18 +455,127 @@ class DB(ThreadPlus):
             self.update(name, value)
         else:
             self.__dict__[name] = value
-    
-        
-if len(sys.argv) < 3:
-    usage("Insufficient arguments")
-elif len(sys.argv) > 3:
-    usage("Unexpected extra arguments: %s" % (sys.argv[3:]))
 
+
+class Interlocutor(threading.Thread):
+    """Receive requests from a connected socket and provide responses."""
+    def __init__(self, socket, controller, serversocket):
+        super(Interlocutor, self).__init__()
+        self.socket = socket
+        self.controller = controller
+        self.serversocket = serversocket
+        self.running = True
+        self.start()
+
+    def send(self, msg):
+        if self.running:
+            totalsent = 0
+            while totalsent < len(msg):
+                sent = self.socket.send(msg[totalsent:])
+                if sent == 0:
+                    self.running = False
+                    print "LOG: Socket connection broken during write"
+                    return
+                totalsent = totalsent + sent
+
+    def recv(self, len):
+        try:
+            return self.socket.recv(len)
+        except:
+            # TODO: Make this log something, and make it a more specific
+            # exception trap - AFAIK, it only happens during shutdown.
+            return ''
+        
+    def write(self, msg):
+        msglen = len(msg)
+        self.send(chr(msglen))
+        self.send(msg)
+
+    def close(self):
+        if self.running:
+            self.socket.shutdown(socket.SHUT_RD)
+            self.running = False
+
+    def shutdown(self):
+        self.socket.shutdown(socket.SHUT_RDWR)
+        self.close()
+        self.serversocket.shutdown(socket.SHUT_RDWR)
+        self.serversocket.close()
+
+    def get_msg(self):
+        chunk = self.recv(1)
+        if chunk == '':
+            return
+        len = ord(chunk)
+        chunk = self.recv(len)
+        if chunk == '':
+            return
+        return chunk
+        
+    def run(self):
+        buffer = ""
+        while self.running:
+            chunk = self.get_msg()
+            if chunk:
+                buffer = buffer + chunk
+                lines = buffer.split('\n')
+                if len(lines) > 0:
+                    for line in lines[:-1]:
+                        self.controller.put((self, line))
+                buffer = lines[-1]
+            else:
+                break
+        self.socket.close()
+        
+        
 dirname = os.path.dirname(sys.argv[0])
 db = DB("%s/db/player.db" % dirname)
 
 interface = HWInterface(db)
 monitor = Monitor(interface, db)
+
+if len(sys.argv) == 1:
+    # Attempt some socket stuff
+    import socket
+    controller = VolumeController(monitor, interface, db)
+
+    try:
+        serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        serversocket.bind(('localhost', 8888))
+        serversocket.listen(5)
+    except Exception as e:
+        controller.stop()
+        controller.join()
+        raise
+    
+    while True:
+        # accept connections from outside
+        try:
+            (clientsocket, address) = serversocket.accept()
+        except socket.error:
+            # Looks like we are closing down
+            controller.stop()
+            controller.join()
+            try:
+                serversocket.shutdown(socket.SHUT_RDWR)
+            except Exception: pass
+            serversocket.close()
+            break
+        Interlocutor(clientsocket, controller, serversocket)
+
+    sys.exit(0)
+
+
+
+
+
+
+
+if len(sys.argv) < 3:
+    usage("Insufficient arguments")
+elif len(sys.argv) > 3:
+    usage("Unexpected extra arguments: %s" % (sys.argv[3:]))
+
 instream = open_stream(sys.argv[1],
                        "Cannot open \"%s\" for input" % sys.argv[1])
 outstream = open_stream(sys.argv[2],
