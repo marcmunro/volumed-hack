@@ -20,7 +20,8 @@
 #
 
 # TODO:
-# Update vol.php and vol.sh to use this
+# add handling of mute using amixer's mute facility.
+# Update moode to use this
 # Move handling of logarithmic volume control into here from javascript
 # Modify javascript to be more responsive
 # daemonify
@@ -174,16 +175,21 @@ class VolumeController(ThreadPlus):
     def set_mute(self):
         self.monitor.reset_wait()   # No point in fetching current volume any
                                     # time soon.
-        self.db.mute = '1'
-        self.hw_interface.set_volume(0)
+        self.monitor.record_muted(True)
+        if self.db.mpd_mixer == 'hardware':
+            self.hw_interface.set_mute()
+        else:
+            self.hw_interface.set_volume(0)
     
     def set_unmute(self):
         self.monitor.reset_wait()   # No point in fetching current volume any
                                     # time soon.
         level = int(self.db.level)
-        self.hw_interface.set_volume(level)
-        self.monitor.set_volume(level)
-        self.db.mute = '0'
+        if self.db.mpd_mixer == 'hardware':
+            self.hw_interface.set_mute(False)
+        else:
+            self.hw_interface.set_volume(level)
+        self.monitor.record_muted(False)
     
     def set_volume(self, vol):
         self.monitor.reset_wait()   # No point in fetching current volume any
@@ -193,9 +199,9 @@ class VolumeController(ThreadPlus):
             vol = 0
         elif vol > warn_level:
             vol = warn_level
-        if self.db.mute == '0':
+        if (self.db.mute == '0') or (self.db.mpd_mixer == 'hardware'):
             self.hw_interface.set_volume(vol)
-            self.monitor.set_volume(vol)
+            self.monitor.record_volume(vol)
 
     def add_conduit(self, current, conduit):
         if conduit in current:
@@ -210,7 +216,12 @@ class VolumeController(ThreadPlus):
                 conduit.write(msg)
             else:
                 conduit.close()
-    
+
+    def send_response(self, conduits):
+        self.send(conduits, "Vol: %d, Mute: %s\n" % (
+            self.monitor.last_volume,
+            'on' if self.monitor.last_muted else 'off'))
+                
     def process_requests(self, requests):
         """This combines a stream of possibly related commands in requests
         into grouped get and/or set operations.  This means that a
@@ -262,15 +273,15 @@ class VolumeController(ThreadPlus):
                     return
         if mute:
             self.set_mute()
-            self.send(muters, "Muted\n")
+            self.send_response(muters)
         if set:
             self.set_volume(vol)
-            self.send(setters, "Vol: %d\n" % self.monitor.last_volume)
+            self.send_response(setters)
         if unmute:
             self.set_unmute()
-            self.send(unmuters, "Unmuted\n")
+            self.send_response(unmuters)
         if get:
-            self.send(getters, "Vol: %d\n" % self.monitor.last_volume)
+            self.send_response(getters)
         if quit:
             self.send(quitters, None)
     
@@ -304,7 +315,7 @@ class Monitor(ThreadPlus):
         super(Monitor, self).__init__()
         self.hw_interface = hw_interface
         self.db = db
-        self.last_volume = self.fetch_volume()
+        self.last_volume, self.last_muted = self.fetch_volume()
         self.volume_lock = threading.Lock()
         self.wake_time = 0
         self.start()
@@ -315,20 +326,37 @@ class Monitor(ThreadPlus):
     def volume(self):
         return self.last_volume
         
-    def set_volume(self, volume):
-        """Update the volume if it has changed.  Note that this may
+    def record_muted(self, muted):
+        self.record_volume(self.last_volume, muted)
+
+    def record_volume(self, volume, muted=None):
+        """Record the volume if it has changed.  Note that this may
         safely  be called asynchronously."""
         if (volume == 0) and (self.db.mute == '1'):
             return # Do not update our record of the desired volume
 
         with self.volume_lock:
-            if (self.last_volume != volume):
+            if self.last_volume != volume:
                 self.last_volume = volume
-                update_db = True
+                update_vol = True
             else:
-                update_db = False
-        if update_db:
+                update_vol = False
+            if muted is None:
+                update_mute = False
+            else:
+                if self.last_muted != muted:
+                    self.last_muted = muted
+                    update_mute = True
+                else:
+                    update_mute = False
+        # Order is important (we mute before altering volume, and
+        # alter volume before unmuting
+        if update_mute and muted:
+            self.db.mute = '1'
+        if update_vol:
             self.db.level = volume
+        if update_mute and not muted:
+            self.db.mute = '0'
         
     def reset_wait(self):
         """Reset our sleep timeout time."""
@@ -337,22 +365,22 @@ class Monitor(ThreadPlus):
     def run(self):
         while self.running:
             if self.sleep(Monitor.RESOLUTION):
-                vol = self.fetch_volume()
-                self.set_volume(vol)
+                vol, mute = self.fetch_volume()
+                self.record_volume(vol, mute)
                 
 class HWInterface:
     """Provide an interface to the volume control hardware."""
 
     def __init__(self, db):
         self.db = db
-        self.pct_re = re.compile("([0-9]+)?[^0-9]*([0-9]+)%")
+        self.volume_re = re.compile("([0-9]+)?[^0-9]*([0-9]+)%.*\[(on|off)\]")
         self.cardnum = self.get_cardnum()
 
     def get_cardnum(self):
-        """Based on the original vol.sh, though I am not entirely
-        convinced.  My use case for the music box includes having a usb
-        audio capture device.  I fear that such an extra card may make
-        this approach fail."""
+        """Based on vol.sh, though I am not entirely convinced.  My use
+        case for the music box includes having a usb audio capture
+        device.  I fear that such an extra card may make this approach
+        fail - I  guess we'll see."""
         try:
             open("/proc/asound/card1/id")
             return 1
@@ -372,9 +400,21 @@ class HWInterface:
 
         # TODO: Put in some error handling here    
         out = subprocess.check_output(cmd.split(' '))
-        match = self.pct_re.search(out)
-        return int(match.group(2))
-
+        match = self.volume_re.search(out)
+        vol = int(match.group(2))
+        if self.db.mpd_mixer == 'hardware':
+            mute = match.group(3) == 'off'
+        else:
+            mute = self.db.mute == '1'
+        return vol, mute
+    
+    def set_mute(self, mute=True):
+        if self.db.mpd_mixer == 'hardware':
+            cmd = ("amixer -c %d sset %s %s" %
+                   (self.cardnum, self.db.alsa_mixer,
+                    'mute' if mute else 'unmute'))
+            out = subprocess.check_output(cmd.split(' '))
+        
     def set_volume(self, volume):
         if self.db.mpd_mixer == 'hardware':
             if self.db.volcurve == 'Yes':
@@ -388,11 +428,12 @@ class HWInterface:
 
         # TODO: log the following?
         out = subprocess.check_output(cmd.split(' '))
-        match = self.pct_re.search(out)
+        match = self.volume_re.search(out)
         result = int(match.group(2))
         if result != volume:
             # We have a discrepency between what we requested and what
-            # we got.
+            # we got back.  This is probably due to rounding errors in
+            # the pct calculation, so let's try to overcome them.
             if match.group(1):
                 # We have an actual value as well as a pct.  Let's
                 # try incrementing or decrementing it.
@@ -577,7 +618,7 @@ if len(sys.argv) == 1:
 
     try:
         serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        serversocket.bind(('localhost', 8888))
+        serversocket.bind(('', 8888))
         serversocket.listen(5)
     except Exception as e:
         controller.stop()
@@ -600,34 +641,3 @@ if len(sys.argv) == 1:
         Interlocutor(clientsocket, controller, serversocket)
 
     sys.exit(0)
-
-
-
-
-
-
-
-if len(sys.argv) < 3:
-    usage("Insufficient arguments")
-elif len(sys.argv) > 3:
-    usage("Unexpected extra arguments: %s" % (sys.argv[3:]))
-
-instream = open_stream(sys.argv[1],
-                       "Cannot open \"%s\" for input" % sys.argv[1])
-outstream = open_stream(sys.argv[2],
-                        "Cannot open \"%s\" for writing" % sys.argv[2],
-                        True)
-
-conduit = Conduit(instream, outstream)
-
-v = VolumeController(monitor, interface, db)
-
-while v.running:
-    res = instream.readline()
-    if res == "":
-        break
-    else:
-        v.put((conduit, res.strip()))
-v.join()
-monitor.stop()
-db.stop()
