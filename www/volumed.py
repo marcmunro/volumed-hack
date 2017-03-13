@@ -20,7 +20,9 @@
 #
 
 # TODO:
-# add handling of mute using amixer's mute facility.
+# Change protocol to remove length byte and instead use \0 message
+# terminator?
+# Provide a websocket mechanism to this
 # Update moode to use this
 # Move handling of logarithmic volume control into here from javascript
 # Modify javascript to be more responsive
@@ -35,40 +37,6 @@ import re
 import sqlite3
 import subprocess
 
-def usage(msg):
-    sys.stderr.write("ERROR: %s\n\n" % msg)
-    sys.stderr.write("TODO: Write usage message.\n" % msg)
-    sys.exit(2)
-
-def open_stream(name, errmsg, write=False):
-    """Simple utility function to open a stream so that we can use '-'
-    to mean stdout/stdin."""
-    try:
-        if name == "-":
-            if write:
-                stream = sys.stdout
-            else:
-                stream = sys.stdin
-        else:
-            stream = open(name, "a" if write else "r")
-        return stream
-    except IOError as e:
-        usage("%s\n\n%s\n" % (errmsg, e))
-
-
-class Conduit:
-    """Provides a mechanism to communicate to a volumed client.
-    Initially this will simply provide access to the in and out streams."""
-    def __init__(self, instream, outstream):
-        self.instream = instream
-        self.outstream = outstream
-
-    def write(self, str):
-        self.outstream.write(str)
-
-    def close(self):
-        print "CLOSING SOCKET TO %s" % self
-        
 class ThreadPlus(threading.Thread):
     """Thread with added stop, sleep and sleep_target manipulation
     methods."""
@@ -100,7 +68,7 @@ class ThreadPlus(threading.Thread):
         self.set_sleep_target(now + sleep_time)
         
         while self.running:
-            # sys.stdout.flush() # Useful when tee-ing the output for debug
+            # sys.stdout.flush() # Uncomment when tee-ing the output for debug
             tick = min(now + ThreadPlus.RESOLUTION, self.target())
             time.sleep(tick - now)
             now = time.time()
@@ -117,7 +85,7 @@ class VolumeController(ThreadPlus):
         self.hw_interface = hw_interface
         self.db = db
         self.queue = Queue.Queue()
-        self.volume_re = re.compile("^ *vol *([+-])?([0-9]*) *$",
+        self.volume_re = re.compile("^ *vol *([+-])? *([0-9]+) *$",
                                     re.IGNORECASE)
         self.mute_re = re.compile("^ *(Un)?Mute *$", re.IGNORECASE)
         self.quit_re = re.compile("^ *q(uit)? *$", re.IGNORECASE)
@@ -135,10 +103,18 @@ class VolumeController(ThreadPlus):
         #print "Put: %s\n" % (payload,)
         self.queue.put(payload)
         
-    def get(self, *args):
-        res = self.queue.get(*args)
-        #print "Get: %s\n" % (res,)
-        return res
+    def get(self, block=True, timeout=None):
+        # Safe version of get.  TODO: refactor this into ThreadPlus
+        if block and timeout is None:
+            while self.running:
+                try:
+                    res = self.queue.get(True, ThreadPlus.RESOLUTION)
+                    return res
+                except Queue.Empty:
+                    pass
+        else:
+            res = self.queue.get(block, timeout)
+            return res
         
     def parse_request(self, request):
         match = self.volume_re.match(request)
@@ -152,7 +128,8 @@ class VolumeController(ThreadPlus):
                     val = -val
             else:
                 if match.group(2):
-                    cmd = 'set'
+                    if match.group(3):
+                        cmd = 'set'
                 else:
                     cmd = 'get'
         else:
@@ -195,6 +172,7 @@ class VolumeController(ThreadPlus):
         self.monitor.reset_wait()   # No point in fetching current volume any
                                     # time soon.
         warn_level = int(self.db.warning_level)
+            
         if vol < 0:
             vol = 0
         elif vol > warn_level:
@@ -212,7 +190,7 @@ class VolumeController(ThreadPlus):
 
     def send(self, conduits, msg):
         for conduit in conduits:
-            if msg:
+            if msg and self.running:
                 conduit.write(msg)
             else:
                 conduit.close()
@@ -271,27 +249,32 @@ class VolumeController(ThreadPlus):
                     conduit.shutdown()
                     self.stop()
                     return
-        if mute:
-            self.set_mute()
-            self.send_response(muters)
-        if set:
-            self.set_volume(vol)
-            self.send_response(setters)
-        if unmute:
-            self.set_unmute()
-            self.send_response(unmuters)
-        if get:
-            self.send_response(getters)
-        if quit:
-            self.send(quitters, None)
+            else:
+                conduit.write("Unable to parse msg: \"%s\"\n" % request)
+        if self.running:
+            if mute:
+                self.set_mute()
+                self.send_response(muters)
+            if set:
+                self.set_volume(vol)
+                self.send_response(setters)
+            if unmute:
+                self.set_unmute()
+                self.send_response(unmuters)
+            if get:
+                self.send_response(getters)
+            if quit:
+                self.send(quitters, None)
     
     def get_requests(self):
         """Compile all outstanding requests into a single list to
         process.  Each list entry is a tuple of the form: (conduit,
         request_string)"""
-        requests = [self.get()]
-        while not self.queue.empty():
-            requests.append(self.get(False))
+        requests = self.get()
+        if requests:
+            requests = [requests]
+            while not self.queue.empty():
+                requests.append(self.get(False))
         return requests
 
     def run(self):
@@ -302,7 +285,8 @@ class VolumeController(ThreadPlus):
         # queue once any previous command has been completely processed.
         while self.running:
             requests = self.get_requests()
-            self.process_requests(requests)
+            if requests and self.running:
+                self.process_requests(requests)
             
 class Monitor(ThreadPlus):
     RESOLUTION = 2.0
@@ -371,11 +355,12 @@ class Monitor(ThreadPlus):
 class HWInterface:
     """Provide an interface to the volume control hardware."""
 
-    def __init__(self, db):
+    def __init__(self, db, emulate=False):
         self.db = db
         self.volume_re = re.compile("([0-9]+)?[^0-9]*([0-9]+)%.*\[(on|off)\]")
         self.cardnum = self.get_cardnum()
-
+        self.emulation = (42, False) if emulate else None
+        
     def get_cardnum(self):
         """Based on vol.sh, though I am not entirely convinced.  My use
         case for the music box includes having a usb audio capture
@@ -388,6 +373,8 @@ class HWInterface:
             return 0
         
     def volume(self):
+        if self.emulation:
+            return self.emulation
         if self.db.mpd_mixer == 'hardware':
             if self.db.volcurve == 'Yes':
                 cmd = ("amixer -c %d sget %s -M" %
@@ -409,6 +396,9 @@ class HWInterface:
         return vol, mute
     
     def set_mute(self, mute=True):
+        if self.emulation:
+            self.emulation = (self.emulation[0], mute)
+            return self.emulation
         if self.db.mpd_mixer == 'hardware':
             cmd = ("amixer -c %d sset %s %s" %
                    (self.cardnum, self.db.alsa_mixer,
@@ -416,6 +406,10 @@ class HWInterface:
             out = subprocess.check_output(cmd.split(' '))
         
     def set_volume(self, volume):
+        if self.emulation:
+            self.emulation = (volume, self.emulation[1])
+            return self.emulation
+            return self.emulation
         if self.db.mpd_mixer == 'hardware':
             if self.db.volcurve == 'Yes':
                 cmd = ("amixer -c %d sset %s -M% d%%" %
@@ -447,7 +441,8 @@ class HWInterface:
                            (self.cardnum, self.db.alsa_mixer, actual))
                     out = subprocess.check_output(cmd.split(' '))
                     
-        
+class NoDBException(Exception): pass
+
 class DB(ThreadPlus):
     """Provide a nice simple setter/getter interface to the database
     fields, and allow it to be done with threads."""
@@ -496,6 +491,9 @@ class DB(ThreadPlus):
             self.fetchtimes[field] = 0
         
     def fetch(self, field):
+        if not self.running:
+            raise NoDBException()
+
         self.makeField(field)
         now = time.time()    
         if self.fetchtimes[field] + DB.STALE_LIMIT < now:
@@ -513,8 +511,10 @@ class DB(ThreadPlus):
         return self.fields[field]
 
     def update(self, field, value):
+        if not self.running:
+            raise NoDBException()
         self.makeField(field)
-        print "DB: set %s to %s" % (field, value)
+        #print "DB: set %s to %s" % (field, value)
         self.qry_q.put("update cfg_engine set value = '%s' where id = %d" %
                        (value, DB.FIELD_IDS[field]))
         res = self.res_q.get()  # for each qry_q write there must be a
@@ -534,12 +534,14 @@ class DB(ThreadPlus):
 
 class Interlocutor(threading.Thread):
     """Receive requests from a connected socket and provide responses."""
-    def __init__(self, socket, controller, serversocket):
+    def __init__(self, socket, controller, serversocket, deaded):
         super(Interlocutor, self).__init__()
         self.socket = socket
         self.controller = controller
         self.serversocket = serversocket
+        self.deaded = deaded
         self.running = True
+        self.buffered = ''
         self.start()
 
     def send(self, msg):
@@ -559,35 +561,57 @@ class Interlocutor(threading.Thread):
         except:
             # TODO: Make this log something, and make it a more specific
             # exception trap - AFAIK, it only happens during shutdown.
+            self.close()
             return ''
         
     def write(self, msg):
-        msglen = len(msg)
-        self.send(chr(msglen))
-        self.send(msg)
+        try:
+            self.send(msg)
+            self.send("\0")
+        except Exception as e:
+            # I suspect that error handling elsewhere wil catch this.
+            print "OMG: %s" % e
+            print "IF WE DO NOT SHUT DOWN THERE IS A BUG HERE!"
+            self.close()
 
     def close(self):
         if self.running:
             try:
                 self.socket.shutdown(socket.SHUT_RD)
+                #print "CLIENTSOCKET CLOSED FOR READ: %s" % clientsocket
             except: pass # Nothing much to do if we get an error here.
             self.running = False
 
     def shutdown(self):
-        self.socket.shutdown(socket.SHUT_RDWR)
         self.close()
-        self.serversocket.shutdown(socket.SHUT_RDWR)
-        self.serversocket.close()
+        killSocket(self.socket)
+        self.deaded.deaded = True
+        killSocket(self.serversocket)
+
+    def get_from_buffer(self):
+        if self.buffered != '':
+            parts = self.buffered.split("\0", 1)
+            if len(parts) == 2:
+                self.buffered = parts[1]
+                # Deal with non-unix line endings (html?)
+                return parts[0].replace(chr(13), chr(10))
 
     def get_msg(self):
-        chunk = self.recv(1)
-        if chunk == '':
-            return
-        len = ord(chunk)
-        chunk = self.recv(len)
-        if chunk == '':
-            return
-        return chunk
+        result = self.get_from_buffer()
+        if result:
+            return result
+        while True:
+            chunk = self.recv(1024)
+            if chunk == '':
+                #print "CLIENTSOCKET END OF INPUT: %s" % clientsocket
+                if self.buffered != '':
+                    self.buffered += "\0"
+                    return self.get_from_buffer()
+                return
+            self.buffered += chunk
+            result = self.get_from_buffer()
+            if result:
+                return result
         
     def run(self):
         buffer = ""
@@ -602,42 +626,114 @@ class Interlocutor(threading.Thread):
                 buffer = lines[-1]
             else:
                 break
+        if buffer != "":
+            self.controller.put((self, "%s\n" % buffer))
         self.socket.close()
         
+class OnTimeout(ThreadPlus):
+    def __init__(self, timeout, func, *args):
+        super(OnTimeout, self).__init__()
+        self.timeout = timeout
+        self.func = func
+        self.args = args
+        self.start()
+
+    def stop(self):
+        super(OnTimeout, self).stop()
         
-dirname = os.path.dirname(sys.argv[0])
-db = DB("%s/db/player.db" % dirname)
+    def run(self):
+        if self.sleep(self.timeout):
+            print "TIMED-OUT"
+            # We reached our timeout
+            self.func(*self.args)
 
-interface = HWInterface(db)
-monitor = Monitor(interface, db)
-
-if len(sys.argv) == 1:
-    # Attempt some socket stuff
-    import socket
-    controller = VolumeController(monitor, interface, db)
-
+def killSocket(socket, msg=None):
+    if msg:
+        sys.stderr.write("%s\n" % msg)
     try:
-        serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        serversocket.bind(('', 8888))
-        serversocket.listen(5)
-    except Exception as e:
-        controller.stop()
-        controller.join()
-        raise
-    
-    while True:
-        # accept connections from outside
-        try:
-            (clientsocket, address) = serversocket.accept()
-        except socket.error:
-            # Looks like we are closing down
-            controller.stop()
-            controller.join()
-            try:
-                serversocket.shutdown(socket.SHUT_RDWR)
-            except Exception: pass
-            serversocket.close()
-            break
-        Interlocutor(clientsocket, controller, serversocket)
+        socket.shutdown(socket.SHUT_RDWR)
+    except Exception: pass
+    try:
+        socket.close()
+    except Exception: pass
 
-    sys.exit(0)
+class Deaded:
+    """Dumb class to record whether something has been killed."""
+    def __init__(self):
+        self.deaded = False
+
+    def __call__(self):
+        return self.deaded
+
+def cleanupConnections(connections):
+    items = len(connections)
+    this = 0
+    while this < items:
+        if connections[this].running:
+            this += 1
+        else:
+            del(connections[this])
+            items -= 1
+    
+if __name__ == '__main__':
+    import socket
+    import optparse
+    import traceback
+
+    parser = optparse.OptionParser()
+    parser.add_option("-p", "--port", type=int, dest="port", default=8888,
+                      help="Run volumed server using specified port")
+    parser.add_option("-e", "--emulate",  dest="emulate",
+                      action="store_true", help="Emulate the hw interface")
+
+    (options, args) = parser.parse_args()
+    dirname = os.path.dirname(sys.argv[0])
+    db = DB("%s/db/player.db" % dirname)
+
+    interface = HWInterface(db, options.emulate)
+    monitor = Monitor(interface, db)
+    controller = VolumeController(monitor, interface, db)
+    result = 0
+    
+    serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    serversocket_deaded = Deaded()
+    #print "SERVERSOCKET: %s" % serversocket
+    try:
+        connections = []
+        to = OnTimeout(5, killSocket, serversocket,
+                       "Timed-out while trying to bind server socket.")
+        serversocket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        serversocket.bind(('', options.port))
+        to.stop()
+        serversocket.listen(5)
+        serversocket.settimeout(0.2)
+        
+        while True:
+            # accept connections from outside
+            try:
+                (clientsocket, address) = serversocket.accept()
+                #print "CLIENTSOCKET: %s" % clientsocket
+            except socket.timeout:
+                continue
+            except Exception:
+                if serversocket_deaded():
+                    # We killed the serversocket, so this exception is
+                    # expected (whatever it is).
+                    break
+                raise
+            connections.append(
+                Interlocutor(clientsocket, controller, serversocket,
+                             serversocket_deaded))
+            cleanupConnections(connections)
+
+    except Exception as e:
+        traceback.print_exc()
+        result = 2
+    finally:
+        to.stop()
+        controller.stop()
+        for i in connections:
+            i.close()
+        controller.join()
+        killSocket(serversocket)
+        sys.exit(result)

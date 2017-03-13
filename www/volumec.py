@@ -17,22 +17,39 @@ class Receiver(threading.Thread):
     def __init__(self, socket):
         super(Receiver, self).__init__()
         self.socket = socket
+        self.buffered = ''
         self.start()
 
+    def get_from_buffer(self):
+        if self.buffered != '':
+            parts = self.buffered.split("\0", 1)
+            if len(parts) == 2:
+                self.buffered = parts[1]
+                # Deal with non-unix line endings (html?)
+                return parts[0].replace(chr(13), chr(10))
+
     def get_msg(self):
-        chunk = self.socket.recv(1)
-        if chunk == '':
-            return
-        len = ord(chunk)
-        chunk = self.socket.recv(len)
-        if chunk == '':
-            return
-        return chunk
+        result = self.get_from_buffer()
+        if result:
+            return result
+        while True:
+            chunk = self.socket.recv(1024)
+            if chunk == '':
+                #print "CLIENTSOCKET END OF INPUT: %s" % clientsocket
+                if self.buffered != '':
+                    self.buffered += "\0"
+                    return self.get_from_buffer()
+                return
+            self.buffered += chunk
+            result = self.get_from_buffer()
+            if result:
+                return result
         
     def run(self):
         buffer = ""
         while True:
             chunk = self.get_msg()
+            print "CHUNK: %s" % chunk
             if chunk:
                 buffer = buffer + chunk
                 lines = buffer.split('\n')
@@ -41,7 +58,9 @@ class Receiver(threading.Thread):
                         print line
                 buffer = lines[-1]
             else:
-                return
+                break
+        self.socket.shutdown(socket.SHUT_RDWR)
+        self.socket.close()
 
 def sendmsg(socket, msg):
     """Assume that all messages are less than 255 bytes long."""
@@ -56,9 +75,8 @@ def sendmsg(socket, msg):
         totalsent = totalsent + sent
 
 def send(socket, msg):
-    msglen = len(msg)
-    sendmsg(socket, chr(msglen))
     sendmsg(socket, msg)
+    sendmsg(socket, "\0")
 
 
 if __name__ == '__main__':
