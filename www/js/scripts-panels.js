@@ -27,11 +27,7 @@
  */
 
 // TODO:
-//       - increment/decrement volume
-//       - mute
-//       - test non-hardware volume control
 //       - migrate logarithmic stuff to volumed
-//       - check diffs in templates/css apply similar to themes
 //       - 
 
 var libRendered = false;			// trigger library load
@@ -145,41 +141,47 @@ jQuery(document).ready(function($) { 'use strict';
 
         // volume up/down/mute
         else if ($(this).hasClass('btn-volume')) {
-	        volEvent = '';
+	    volEvent = '';
 	        
-	        var newVol;
-			var volKnob = parseInt(SESSION.json['volknob']);
-			
-            if ($(this).attr('id') == 'volumedn' || $(this).attr('id') == 'volumedn-2') {
-                newVol = volKnob > 0 ? volKnob - 1 : volKnob;
-            } else if ($(this).attr('id') == 'volumeup' || $(this).attr('id') == 'volumeup-2') {
-				newVol = volKnob < 100 ? volKnob + 1 : volKnob;
+	    var newVol;
+	    var volKnob = parseInt(SESSION.json['volknob']);
+	    
+            if ($(this).attr('id') == 'volumedn' ||
+		$(this).attr('id') == 'volumedn-2')
+	    {
+		if (volKnob > 0) {
+		    sendVolumedCmd('vol ' + (volKnob - 1), SESSION);
+		}
+            }
+	    else if ($(this).attr('id') == 'volumeup' ||
+		     $(this).attr('id') == 'volumeup-2')
+	    {
+		if (volKnob < 100) {
+		    newVol = volKnob + 1;
 				
 	            if (newVol > parseInt(SESSION.json['volwarning'])) {
-		            $('#volume-warning-text').text('Volume setting ' + newVol + ' exceeds warning limit of ' + SESSION.json['volwarning']);
-		            $('#volumewarning-modal').modal();
-	            }
-            } else if ($(this).attr('id') == 'volumemute' || $(this).attr('id') == 'volumemute-2') {
-                if (SESSION.json['volmute'] == '0') {
-	                SESSION.json['volmute'] = '1' // toggle to mute
-                    $("#volumemute").addClass('btn-primary');
-					$("#volumemute-2").addClass('btn-primary');
-                    newVol = 0;
-                    volEvent = "mute";
-                } else {
-	                SESSION.json['volmute'] = '0' // toggle to unmute
-                    $("#volumemute").removeClass('btn-primary');
-					$("#volumemute-2").removeClass('btn-primary');
-					newVol = SESSION.json['volknob'];
-                    volEvent = "unmute";
-                }
-
-				var result = sendMoodeCmd('POST', 'updcfgengine', {'volmute': SESSION.json['volmute']});
+			$('#volume-warning-text').text(
+			    'Volume setting ' + newVol +
+				' exceeds warning limit of ' +
+				SESSION.json['volwarning']);
+			$('#volumewarning-modal').modal();
+		    }
+		    else {
+			sendVolumedCmd('vol ' + newVol, SESSION);
+		    }
+	        }
             }
-
-			if (newVol <= parseInt(SESSION.json['volwarning'])) {				
-				setVolume(newVol, volEvent);
-			}
+	    else if ($(this).attr('id') == 'volumemute' ||
+		     $(this).attr('id') == 'volumemute-2')
+	    {
+                if (SESSION.json['volmute'] == '0') {
+		    setMute(SESSION, 'on');
+		    sendVolumedCmd('mute', SESSION);
+                } else {
+		    setMute(SESSION, 'off');
+		    sendVolumedCmd('unmute', SESSION);
+                }
+            }
         }
 
         // toggle buttons, repeat, random, single, consume
@@ -266,7 +268,7 @@ jQuery(document).ready(function($) { 'use strict';
         change : function(value) {
 	    if (UI.marcsCode) {
 		this.showCv = true;
-		sendVolumedCmd('vol ' + value, this)
+		sendVolumedCmd('vol ' + value, SESSION, this)
 	    }
 	    else {
           if (value > parseInt(SESSION.json['volwarning'])) {
@@ -312,7 +314,7 @@ jQuery(document).ready(function($) { 'use strict';
 		    this.av = this.cv || 0;
 		    this.volto = null; // timeout for volume change operations
 		    this.showCv = false;
-		    sendVolumedCmd('vol', this);
+		    sendVolumedCmd('vol', SESSION, this);
 		}
 		
 		if (this.showCv) {

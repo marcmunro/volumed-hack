@@ -71,7 +71,8 @@ class HWInterface:
 
     def __init__(self, db):
         self.db = db
-        self.volume_re = re.compile("([0-9]+)?[^0-9]*([0-9]+)%.*\[(on|off)\]")
+        self.volume_re = re.compile(
+          "([0-9]*)?[^0-9]*([0-9]+)%(.*\[(on|off)\])?")
         self.cardnum = self.get_cardnum()
         
     def get_cardnum(self):
@@ -101,9 +102,10 @@ class HWInterface:
         match = self.volume_re.search(out)
         vol = int(match.group(2))
         if self.db.mpd_mixer == 'hardware':
-            mute = match.group(3) == 'off'
+            mute = match.group(4) == 'off'
         else:
-            mute = (vol == '0') and (self.db.mute == '1')
+            mute = (vol == 0) and (self.db.mute == 'True')
+            vol = self.db.level
         return vol, mute
     
     def set_mute(self, mute=True):
@@ -128,7 +130,7 @@ class HWInterface:
                 cmd = ("amixer -c %d sset %s %d%%" %
                        (self.cardnum, self.db.alsa_mixer, volume))
         else:
-            cmd = "mpc volume %d" % volume
+            cmd = "mpc volume %s" % volume
 
         # TODO: log the following?
         out = subprocess.check_output(cmd.split(' '))
@@ -156,7 +158,7 @@ class DB:
     """Provide a nice simple setter/getter interface to the database
     fields."""
     
-    STALE_LIMIT = 1.0
+    STALE_LIMIT = 2.0
     FIELD_IDS = {'volcurve': 32,
                  'max_pct': 34,
                  'level': 35,
@@ -193,8 +195,7 @@ class DB:
         return self.fields[field]
 
     def update(self, field, value):
-        if value != self.fields[field]:
-            #print "UPDATING %s TO %s" % (field, value)
+        if value != self.fetch(field):
             # Only update the database if the value is known to have
             # changed.
             qry = ("update cfg_engine set value = '%s' where id = %d" %
@@ -204,7 +205,7 @@ class DB:
             self.fields[field] = value
             self.connection.commit()
             #res = c.fetchall()
-        self.fetchtimes[field] = time.time()
+            self.fetchtimes[field] = time.time()
         
     def __getattr__(self, name):
         return self.fetch(name)
@@ -237,7 +238,6 @@ class VolumeMonitor(ThreadPlus):
     def run(self):
         while self.running:
             if self.sleep(VolumeMonitor.RESOLUTION):
-                print "REPORT"
                 self.report_change()
             
 
@@ -245,9 +245,9 @@ class VolumeController(ThreadPlus):
     def __init__(self, dirname, options):
         super(VolumeController, self).__init__()
         self.running = True
+        self.emulate = options.emulate
         self.db = DB("%s/db/player.db" % dirname)
         self.hw_interface = HWInterface(self.db)
-        self.emulate = options.emulate
         self.monitor = None if self.emulate else VolumeMonitor(self)
         self.queue = Queue.Queue()
         self.volume_re = re.compile("^ *vol *([+-])? *([0-9]+)? *$",
@@ -346,15 +346,15 @@ class VolumeController(ThreadPlus):
     def set_mute(self, mute=True):
         if not self.emulate:
             self.hw_interface.set_mute(mute)
-        self.db.mute = '1' if mute else '0'
+        self.db.mute = 'True' if mute else 'False'
         self.report_change()
                 
     def get_volume(self):
         if not self.emulate:
             vol, mute = self.hw_interface.get_volume()
             self.db.level = vol
-            self.db.mute = mute
-        return self.db.level, self.db.mute
+            self.db.mute = 'True' if mute else 'False'
+        return self.db.level, self.db.mute == 'True'
         
     def set_volume(self, vol):
         warn_level = int(self.db.warning_level)
@@ -370,11 +370,11 @@ class VolumeController(ThreadPlus):
         self.report_change()
 
     def compose_response(self, vol, mute):
-        return "Vol: %s, Mute: %s\n" % (vol, 'on' if mute == '1' else 'off')
+        return "Vol: %s, Mute: %s\n" % (vol, 'on' if mute else 'off')
         
     def send_responses(self, sockets):
         self.send(sockets,
-                  self.compose_response(self.db.level, self.db.mute))
+                  self.compose_response(self.db.level, self.db.mute == 'True'))
                 
     def process_requests(self, requests):
         vol = int(self.db.level)
@@ -441,7 +441,6 @@ class VolumeController(ThreadPlus):
         for w in watchers:
             try:
                 w.send(msg)
-                print "SENT(2): %s" % msg
                 ok_watchers[w] = 1
             except Exception as e:
                 try:

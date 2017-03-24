@@ -108,7 +108,24 @@ function sendMpdCmd(cmd, async) {
     });
 }
 
-function sendVolumedCmd(cmd, volknob) {
+function setMute(session, mute) {
+    console.log("setMute: " + mute);
+    console.log("SESSION: " + session);
+    if (mute.trim() == 'on') {
+	console.log("seting mute on");
+	session.json['volmute'] = '1';
+	$("#volumemute").addClass('btn-primary');
+	$("#volumemute-2").addClass('btn-primary');
+    }
+    else {
+	console.log("seting mute off");
+	session.json['volmute'] = '0';
+	$("#volumemute").removeClass('btn-primary');
+	$("#volumemute-2").removeClass('btn-primary');
+    }
+}
+
+function sendVolumedCmd(cmd, session, volknob) {
     var websocket = null;
     var pending = cmd;
 
@@ -133,12 +150,16 @@ function sendVolumedCmd(cmd, volknob) {
 	    }
 	    open = true;
 	};
-	websocket.onmessage = function(e){
-	    parts = e.data.split(': ');
+	websocket.onmessage = function(msg){
+	    console.log("sendVoldCmd: message: " + msg.data);
+	    parts = msg.data.split(': ');
 	    parts2 = parts[1].split(',');
 	    vol = parts2[0];
 	    mute = parts[2];
 	    
+	    setMute(session, mute);
+	    session.json['volknob'] = vol;
+
 	    var volknobs = UI.volControls.length
 	    var knob;
 	    for (var v = 0; v < volknobs; v++) {
