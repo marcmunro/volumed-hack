@@ -26,6 +26,14 @@
  *
  */
 
+// TODO:
+//       - increment/decrement volume
+//       - mute
+//       - test non-hardware volume control
+//       - migrate logarithmic stuff to volumed
+//       - check diffs in templates/css apply similar to themes
+//       - 
+
 var libRendered = false;			// trigger library load
 
 jQuery(document).ready(function($) { 'use strict';
@@ -249,23 +257,42 @@ jQuery(document).ready(function($) { 'use strict';
         },
         cancel : function () {},
 
-        draw : function () {}
+      draw : function () {
+      }
     });
 
     // volume control knob
     $('.volumeknob').knob({
-        change : function (value) {
-            if (value > parseInt(SESSION.json['volwarning'])) {
+        change : function(value) {
+	    if (UI.marcsCode) {
+		this.showCv = true;
+		sendVolumedCmd('vol ' + value, this)
+	    }
+	    else {
+          if (value > parseInt(SESSION.json['volwarning'])) {
 		        $('#volume-warning-text').text('Volume setting ' + value + ' exceeds warning limit of ' + SESSION.json['volwarning']);
 		        $('#volumewarning-modal').modal();
 	            setVolume(SESSION.json['volknob'], "change"); // restore original value
 			} else {
 	            setVolume(value, "change"); // set new value
 			}
+	    }
         },
 
         release : function (value) {
-            // not needed, results in duplicate setVolume cmds
+	    var that = this;
+	    if (this.volto != null) {
+		clearTimeout(this.volto);
+	    }
+	    this.volto = setTimeout(
+		// If the timeout expires we will have to reset cv
+		// from the actual volume.
+		function () {
+		    that.showCv = false;
+		    that.cv = that.av
+		    that.volto = null;
+		    that._draw();
+		}, 1000);
         },
         cancel : function () {
             // never seen this event
@@ -273,41 +300,102 @@ jQuery(document).ready(function($) { 'use strict';
         draw : function () {
             // using "tron" skin
             if (this.$.data('skin') == 'tron') {
+		var sv,                         // shown value
+		    style = this.$.attr('style'),
+                    a = this.angle(this.cv),	// angle
+                    sa = this.startAngle,	// previous start angle
+                    sat = this.startAngle,	// start angle
+                    ea,				// previous end angle
+                    eat = sat + a;		// end angle
 
-                var a = this.angle(this.cv)	// angle
-                    , sa = this.startAngle	// previous start angle
-                    , sat = this.startAngle	// start angle
-                    , ea					// previous end angle
-                    , eat = sat + a			// end angle
-                    , r = true;
+		if (typeof(this.av) == 'undefined') {
+		    this.av = this.cv || 0;
+		    this.volto = null; // timeout for volume change operations
+		    this.showCv = false;
+		    sendVolumedCmd('vol', this);
+		}
+		
+		if (this.showCv) {
+		    // The volume display is green when we are manipulating it.
+		    sv = this.cv;
+		    this.$.attr('style', setStyleColor(style, '#27ae60'));
+		}
+		else {
+		    sv = this.av;
+		    this.$.attr('style', setStyleColor(style, '#eeeeee'));
+
+		    if (sv != this.cv) {
+			// It has been a while since we moved the dial,
+			// so cv will need to follow av, but it will do
+			// so with a lag, for effect.
+			var that = this;
+			if (this.volto != null) {
+			    clearTimeout(this.volto);
+			}
+			this.volto = setTimeout(
+			    // When the timeout expires we will set cv
+			    // from the actual volume.
+			    function () {
+				that.showCv = false;
+				that.cv = that.av
+				that.volto = null;
+				that._draw();
+			    }, 1000);
+		    }
+		}
+
+		this.$.val(sv);
 
                 this.g.lineWidth = this.lineWidth;
 
-                this.o.cursor
-                    && (sat = eat - 0.05)
-                    && (eat = eat + 0.05);
+                if (this.o.cursor) {
+                    sat = eat - 0.05;
+                    eat = eat + 0.05;
+		}
+		
+		// Draw the Actual Volume indicator
+                this.g.beginPath();
+                this.g.strokeStyle = this.o.fgColor;
+                this.g.arc(this.xy, this.xy,
+			   this.radius - (this.lineWidth * 0.6),
+			   this.startAngle,
+			   this.startAngle + this.angle(this.av), false);
+                this.g.stroke();
 
+                this.g.lineWidth = this.g.lineWidth * 1.8; //????
+
+		// Something to do with a previous color?
                 if (this.o.displayPrevious) {
                     ea = this.startAngle + this.angle(this.value);
-                    this.o.cursor
-                        && (sa = ea - 0.1)
-                        && (ea = ea + 0.1);
+                    if (this.o.cursor) {
+                        sa = ea - 0.1;
+                        ea = ea + 0.1;
+		    }
                     this.g.beginPath();
                     this.g.strokeStyle = this.previousColor;
-                    this.g.arc(this.xy, this.xy, this.radius - this.lineWidth, sa, ea, false);
+                    this.g.arc(this.xy, this.xy, this.radius - this.lineWidth,
+			       sa, ea, false);
                     this.g.stroke();
                 }
 
-                this.g.beginPath();
-                this.g.strokeStyle = r ? this.o.fgColor : this.fgColor ;
-                this.g.arc(this.xy, this.xy, this.radius - this.lineWidth, sat, eat, false);
-                this.g.stroke();
-
-                this.g.lineWidth = 2;
+		// Draw the Requested Volume indicator
                 this.g.beginPath();
                 this.g.strokeStyle = this.o.fgColor;
-                this.g.arc(this.xy, this.xy, this.radius - this.lineWidth + 10 + this.lineWidth * 2 / 3, 0, 20 * Math.PI, false);
+                this.g.arc(this.xy, this.xy,
+			   this.radius - this.lineWidth,
+			   sat, eat, false);
                 this.g.stroke();
+
+		// Draw the surrounding circle
+                this.g.lineWidth = 2;
+                this.g.beginPath();
+                //this.g.strokeStyle = this.o.fgColor;
+                this.g.arc(this.xy, this.xy,
+			   this.radius - this.lineWidth + 10 +
+			   this.lineWidth * 2 / 3,
+			   0, 2 * Math.PI, false);
+                this.g.stroke();
+                this.g.strokeStyle = this.previousColor;
 
                 return false;
             }

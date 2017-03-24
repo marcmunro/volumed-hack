@@ -40,6 +40,9 @@ var UI = {
     playList: null,
     title: null,
     knob: null,
+    marcsCode: true,
+    webSocket: null,
+    volControls: null,
     path: '',
 	bootTicker: '',
 	turnOff: false,
@@ -103,6 +106,62 @@ function sendMpdCmd(cmd, async) {
 		success: function(data) {
 		}
     });
+}
+
+function sendVolumedCmd(cmd, volknob) {
+    var websocket = null;
+    var pending = cmd;
+
+    if (volknob) {
+	if (UI.volControls === null) {
+	    UI.volControls = [volknob];
+	}
+	else {
+	    UI.volControls.push(volknob)
+	}
+    }
+    
+    if (UI.webSocket === null) {
+	websocket = new WebSocket('ws://moode.local:8888');
+	UI.webSocket = websocket;
+
+	websocket.onopen = function () {
+	    websocket.send('watch\n');
+	    if (pending) {
+		websocket.send(pending);
+		pending = null;
+	    }
+	    open = true;
+	};
+	websocket.onmessage = function(e){
+	    parts = e.data.split(': ');
+	    parts2 = parts[1].split(',');
+	    vol = parts2[0];
+	    mute = parts[2];
+	    
+	    var volknobs = UI.volControls.length
+	    var knob;
+	    for (var v = 0; v < volknobs; v++) {
+		knob = UI.volControls[v];
+		knob.av = parseInt(vol);
+		knob._draw();
+	    }
+	};
+	websocket.onclose = function () {
+	    UI.webSocket = null;
+	    console.log("sendVoldCmd: WEBSOCKET CLOSED");
+	};
+	websocket.onerror = function (error) {
+	    console.log("sendVoldCmd: WEBSOCKET ERROR: " + error);
+	}
+    }
+    else {
+	websocket = UI.webSocket;
+    }
+    if ((websocket.readyState == 1) && pending) {
+	pending = null;
+	websocket.send(cmd);
+    }
 }
 
 // moode commands
@@ -240,14 +299,15 @@ function renderSpsUI() {
 
 // update UI volume and mute only 
 function renderUIVol() {	
-	// load session vars (required for multi-client)
+    return
+    // load session vars (required for multi-client)
 	var resp = sendMoodeCmd('GET', 'readcfgengine');
 	if (resp !== false) {
 		SESSION.json = resp;
 	}
 
 	// NOTE mpd sets vol to -1 when volume mixer 'disabled'
-    $('#volume').val((MPD.json['volume'] === '-1') ? 0 : SESSION.json['volknob']).trigger('change');
+        $('#volume').val((MPD.json['volume'] === '-1') ? 0 : SESSION.json['volknob']).trigger('change');
 	$('#volume-2').val((MPD.json['volume'] === '-1') ? 0 : SESSION.json['volknob']).trigger('change');
 
    	// mute state
@@ -886,7 +946,8 @@ function countdownRestart(startFrom) {
 
 // volume control with optional logarithmic mapping of knob 0-100 range to hardware range
 function setVolume(level, event) {
-	level = parseInt(level); // ensure numeric
+    console.log("setVolume: " + level + ', ' + event)
+    level = parseInt(level); // ensure numeric
 	
 	if (SESSION.json['volmute'] == '0') { // unmuted, set volume (incl 0 vol)
 		SESSION.json['volknob'] = level.toString();
@@ -1845,7 +1906,21 @@ $('#syscmd-poweroff').click(function(){
 	$('#poweroff').show();
 	sendMoodeCmd('GET', 'poweroff');
 });
-	
+
+
+function hexToR(h) {return parseInt((cutHex(h)).substring(0,2),16)}
+function hexToG(h) {return parseInt((cutHex(h)).substring(2,4),16)}
+function hexToB(h) {return parseInt((cutHex(h)).substring(4,6),16)}
+function cutHex(h) {return (h.charAt(0)=="#") ? h.substring(1,7):h}
+function hexToRGB(h) {
+    return 'rgb(' + hexToR(h) + ',' + hexToG(h) + ',' + hexToB(h) + ')'
+}
+
+function setStyleColor(style, hexColor) {
+    return style.replace(/color:[^;]*;/, '') + 'color: ' +
+	hexToRGB(hexColor) + '; '
+}
+
 // TC drag & drop handlers for playlist
 /*
 function allowDrop(ev) {
