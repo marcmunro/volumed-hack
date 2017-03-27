@@ -41,6 +41,8 @@ var UI = {
     title: null,
     knob: null,
     marcsCode: true,
+    volumedActive: true,
+    volumedLastVol: -1,
     webSocket: null,
     volControls: null,
     path: '',
@@ -109,19 +111,22 @@ function sendMpdCmd(cmd, async) {
 }
 
 function setMute(session, mute) {
-    console.log("setMute: " + mute);
-    console.log("SESSION: " + session);
     if (mute.trim() == 'on') {
-	console.log("seting mute on");
 	session.json['volmute'] = '1';
 	$("#volumemute").addClass('btn-primary');
 	$("#volumemute-2").addClass('btn-primary');
     }
     else {
-	console.log("seting mute off");
 	session.json['volmute'] = '0';
 	$("#volumemute").removeClass('btn-primary');
 	$("#volumemute-2").removeClass('btn-primary');
+    }
+}
+
+function sendVolumedVol(vol, session, volknob) {
+    if (UI.volumedActive && (UI.volumedLastVol != vol)) {
+	sendVolumedCmd('vol ' + vol, session, volknob);
+	UI.volumedLastVol = vol;
     }
 }
 
@@ -138,11 +143,13 @@ function sendVolumedCmd(cmd, session, volknob) {
 	}
     }
     
+    //console.log("sendVoldCmd: sending message: " + cmd);
     if (UI.webSocket === null) {
 	websocket = new WebSocket('ws://moode.local:8888');
 	UI.webSocket = websocket;
 
 	websocket.onopen = function () {
+	    UI.volumedActive = true;
 	    websocket.send('watch\n');
 	    if (pending) {
 		websocket.send(pending);
@@ -151,7 +158,7 @@ function sendVolumedCmd(cmd, session, volknob) {
 	    open = true;
 	};
 	websocket.onmessage = function(msg){
-	    console.log("sendVoldCmd: message: " + msg.data);
+	    //console.log("sendVoldCmd: received message: " + msg.data);
 	    parts = msg.data.split(': ');
 	    parts2 = parts[1].split(',');
 	    vol = parts2[0];
@@ -174,6 +181,7 @@ function sendVolumedCmd(cmd, session, volknob) {
 	};
 	websocket.onerror = function (error) {
 	    console.log("sendVoldCmd: WEBSOCKET ERROR: " + error);
+	    UI.volumedActive = false;
 	}
     }
     else {

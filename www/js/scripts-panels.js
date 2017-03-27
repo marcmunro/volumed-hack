@@ -27,7 +27,9 @@
  */
 
 // TODO:
+//       - make volumed usage conditional on volumed functioning
 //       - migrate logarithmic stuff to volumed
+//       - make volumed a systemd service
 //       - 
 
 var libRendered = false;			// trigger library load
@@ -268,7 +270,9 @@ jQuery(document).ready(function($) { 'use strict';
         change : function(value) {
 	    if (UI.marcsCode) {
 		this.showCv = true;
-		sendVolumedCmd('vol ' + value, SESSION, this)
+		this.set_cv_from_av = false;
+		sendVolumedVol(value, SESSION, this);
+		this.val(value);
 	    }
 	    else {
           if (value > parseInt(SESSION.json['volwarning'])) {
@@ -282,19 +286,7 @@ jQuery(document).ready(function($) { 'use strict';
         },
 
         release : function (value) {
-	    var that = this;
-	    if (this.volto != null) {
-		clearTimeout(this.volto);
-	    }
-	    this.volto = setTimeout(
-		// If the timeout expires we will have to reset cv
-		// from the actual volume.
-		function () {
-		    that.showCv = false;
-		    that.cv = that.av
-		    that.volto = null;
-		    that._draw();
-		}, 1000);
+	    // nothing to do here
         },
         cancel : function () {
             // never seen this event
@@ -302,8 +294,7 @@ jQuery(document).ready(function($) { 'use strict';
         draw : function () {
             // using "tron" skin
             if (this.$.data('skin') == 'tron') {
-		var sv,                         // shown value
-		    style = this.$.attr('style'),
+		var style = this.$.attr('style'), // for text colour
                     a = this.angle(this.cv),	// angle
                     sa = this.startAngle,	// previous start angle
                     sat = this.startAngle,	// start angle
@@ -314,39 +305,56 @@ jQuery(document).ready(function($) { 'use strict';
 		    this.av = this.cv || 0;
 		    this.volto = null; // timeout for volume change operations
 		    this.showCv = false;
+		    this.last_cv = this.cv;
+		    this.set_cv_from_av = true;
 		    sendVolumedCmd('vol', SESSION, this);
 		}
 		
-		if (this.showCv) {
-		    // The volume display is green when we are manipulating it.
-		    sv = this.cv;
-		    this.$.attr('style', setStyleColor(style, '#27ae60'));
+		if (this.av == this.cv) {
+		    this.$.attr('style', setStyleColor(style, '#eeeeee'));
 		}
 		else {
-		    sv = this.av;
-		    this.$.attr('style', setStyleColor(style, '#eeeeee'));
-
-		    if (sv != this.cv) {
-			// It has been a while since we moved the dial,
-			// so cv will need to follow av, but it will do
-			// so with a lag, for effect.
-			var that = this;
-			if (this.volto != null) {
-			    clearTimeout(this.volto);
-			}
-			this.volto = setTimeout(
-			    // When the timeout expires we will set cv
-			    // from the actual volume.
-			    function () {
-				that.showCv = false;
-				that.cv = that.av
-				that.volto = null;
-				that._draw();
-			    }, 1000);
-		    }
+		    // The volume display is green when it is changing.
+		    this.$.attr('style', setStyleColor(style, '#27ae60'));
 		}
 
-		this.$.val(sv);
+		if (this.cv != this.last_cv) {
+		    // cv has been altered.
+		    sendVolumedVol(this.cv, SESSION, this);
+
+		    // We will not reset cv from av for the next couple
+		    // of seconds. 
+		    if (this.volto != null) {
+			clearTimeout(this.volto);
+		    }
+		    var that = this;
+		    this.volto = setTimeout(
+			// When the timeout expires we will allow
+			// setting cv from the actual volume.
+			function () {
+			    that.set_cv_from_av = true;
+			    that.volto = null;
+			}, 2000);
+		    this.last_cv = this.cv;
+		}
+		
+		if (this.set_cv_from_av) {
+		    if (this.cv != this.av) {
+			// Set cv from av, but with a lag for a nice
+			// effect.
+			if (this.volto === null) {
+			    // no timeout is currently running
+			    var that = this;
+			    this.volto = setTimeout(
+				function () {
+				    that.cv = that.av
+				    that.last_cv = that.av
+				    that.val(that.av);
+				    that.volto = null;
+				}, 1000);
+			}
+		    }
+		}
 
                 this.g.lineWidth = this.lineWidth;
 
