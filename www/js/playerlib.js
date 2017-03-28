@@ -172,6 +172,9 @@ function sendVolumedCmd(cmd, session, volknob) {
 	    for (var v = 0; v < volknobs; v++) {
 		knob = UI.volControls[v];
 		knob.av = parseInt(vol);
+		if (knob.set_cv_from_av) {
+		    knob.$.val(knob.av);
+		}
 		knob._draw();
 	    }
 	};

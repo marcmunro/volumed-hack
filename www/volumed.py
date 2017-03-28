@@ -373,9 +373,18 @@ class VolumeController(ThreadPlus):
     def send(self, sockets, msg):
         for socket in sockets:
             if msg and self.running:
-                socket.send(msg)
                 if DEBUG:
-                    print "SENT MESSAGE: \"%s\"" % msg.strip()
+                    print "SENDING MESSAGE: \"%s\"" % msg
+                try:
+                    socket.send(msg)
+                except Exception:
+                    # Assume the socket was closed, not much we can do.
+                    sys.stderr.write("Send failed.  Msg: \"%s\".\n" %
+                                     msg.strip())
+                    try:
+                        socket.close()
+                    except Exception:
+                        pass
             else:
                 socket.close()
 
