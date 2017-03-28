@@ -1,0 +1,13 @@
+[Unit]
+Description=Moode Audio volume server
+After=network.target
+
+[Service]
+ExecStart=/var/www/volumed.py
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+Alias=volumed.service

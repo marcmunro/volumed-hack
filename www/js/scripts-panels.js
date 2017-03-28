@@ -26,11 +26,6 @@
  *
  */
 
-// TODO:
-//       - migrate logarithmic stuff to volumed
-//       - make volumed a systemd service
-//       - 
-
 var libRendered = false;			// trigger library load
 
 jQuery(document).ready(function($) { 'use strict';
@@ -203,9 +198,9 @@ jQuery(document).ready(function($) { 'use strict';
 		}
 		else {
 		    setVolume(newVol, 'change');
-		    $('#volume').val(newVol)
-		    $('#volume-2').val(newVol)
 		}
+		$('#volume').val(newVol).trigger('change');
+		$('#volume-2').val(newVol).trigger('change');
 	    }
         }
 

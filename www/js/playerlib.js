@@ -183,12 +183,12 @@ function sendVolumedCmd(cmd, session, volknob) {
 	    console.log("sendVoldCmd: WEBSOCKET ERROR: " + error);
 	    UI.volumedActive = false;
 	    if (UI.websocketTo == null) {
-		// Try again to establish the websocket in 5 seconds
+		// Try again to establish the websocket in 10 seconds
 		UI.websocketTo = setTimeout(
 		    function () {
 			UI.websocketTo = null;
 			sendVolumedCmd(null, session);
-		    }, 5000);
+		    }, 10000);
 	    }
 	}
     }
@@ -983,7 +983,6 @@ function countdownRestart(startFrom) {
 
 // volume control with optional logarithmic mapping of knob 0-100 range to hardware range
 function setVolume(level, event) {
-    console.log("setVolume: " + level + ', ' + event)
     level = parseInt(level); // ensure numeric
 	
 	if (SESSION.json['volmute'] == '0') { // unmuted, set volume (incl 0 vol)

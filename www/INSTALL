@@ -1,0 +1,15 @@
+Installation and setup notes:
+
+apt-get install python-gevent 
+
+get a copy pf ws4py (git clone is good)
+copy ws4py to: /usr/local/lib/python2.7/site-packages
+
+Move the volumed.service file into /lib/systemd/system/volumed.service
+
+Execute: systemctl enable volumed.service
+
+
+
+
+

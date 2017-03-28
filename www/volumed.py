@@ -1,7 +1,38 @@
 #! /usr/bin/env python
-# TODO: make emulation a boolean rather than a tuple and use the
-# database to record the state.
+#
+# This Program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License, version 3, as
+# published by the Free Software Foundation.
+# 
+# This Program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with TsunAMP; see the file COPYING.  If not, see
+# <http://www.gnu.org/licenses/>.
+# 
+# Volume Control Daemon   (c) 2017 Marc Munro
+#
+# Built for Moode audio player.
+#
+# This provides a websocket interface for controlling the volume and
+# mute, which can greatly improve the responsiveness of a web client.
+# It also manages the update of Moode's database for volume and mute
+# status, and actively polls the hardware so that any out of band change
+# to volume/mute can be reported to clients.
+#
+# Note that a client, volumec.py, is also provided for testing purposes
+# and for implementing shell-based interfaces, eg for IR remotes.
+#
+# TODO:
+#   - volume curve correction: see note in
+#       VolumeController.correct_volume()
+#
 
+import sys
+sys.path.append('/usr/local/lib/python2.7/site-packages')
 from gevent import monkey; monkey.patch_all()
 from ws4py.websocket import WebSocket
 from ws4py.server.geventserver import WSGIServer
@@ -17,6 +48,8 @@ import subprocess
 
 from ws4py import configure_logger
 configure_logger()
+
+DEBUG = False		# Global flag for controlling debug output.
 
 class Singleton(object):
   _instances = {}
@@ -124,7 +157,7 @@ class HWInterface:
     def set_volume(self, volume):
         if self.db.mpd_mixer == 'hardware':
             if self.db.volcurve == 'Yes':
-                cmd = ("amixer -c %d sset %s -M% d%%" %
+              cmd = ("amixer -c %d sset %s -M% d%%" %
                        (self.cardnum, self.db.alsa_mixer, volume))
             else:
                 cmd = ("amixer -c %d sset %s %d%%" %
@@ -160,6 +193,7 @@ class DB:
     
     STALE_LIMIT = 2.0
     FIELD_IDS = {'volcurve': 32,
+                 'volcurvefac': 56,
                  'max_pct': 34,
                  'level': 35,
                  'mute': 36,
@@ -241,6 +275,8 @@ class VolumeMonitor(ThreadPlus):
                 self.report_change()
             
 
+class Termination(Exception): pass
+    
 class VolumeController(ThreadPlus):
     def __init__(self, dirname, options):
         super(VolumeController, self).__init__()
@@ -292,11 +328,14 @@ class VolumeController(ThreadPlus):
                 #elif self.shutdown_re.match(message):
                 #    cmd = 'shutdown'
                     
-        #print "CMD: %s, VAL: %s (message: \"%s\")" % (cmd, val, message)
+        if DEBUG:
+            print ("PARSED CMD: %s, VAL: %s (message: \"%s\")" %
+                   (cmd, val, message))
         return (cmd, val)
         
     def process_message(self, socket, message):
-        #print "PROCESSING MSG: \"%s\"" % message
+        if DEBUG:
+            print "PROCESSING MSG: \"%s\"" % message
         cmd, val = self.parse_message(message)
         self.queue.put((socket, cmd, val, message))
             
@@ -335,7 +374,8 @@ class VolumeController(ThreadPlus):
         for socket in sockets:
             if msg and self.running:
                 socket.send(msg)
-                print "SENT: %s" % msg
+                if DEBUG:
+                    print "SENT MESSAGE: \"%s\"" % msg.strip()
             else:
                 socket.close()
 
@@ -348,21 +388,42 @@ class VolumeController(ThreadPlus):
             self.hw_interface.set_mute(mute)
         self.db.mute = 'True' if mute else 'False'
         self.report_change()
-                
+
+    def correct_volume(self, vol, writing):
+        """Stub for doing volume curve correction.  Currently this does
+        nothing.
+
+        Note that it *must* work so that: 
+          self.correct_volume(self.correct_volume(vol, False), True))
+        is equal to:
+          vol
+        and also to: 
+          self.correct_volume(self.correct_volume(vol, True), False))
+
+        Note that when reading and writing volume data from/to the
+        hardware interface, it will probably be better to read/write the
+        absolute volume level rather than using percentages.  No
+        provision has currently been made to do this.  You will need to
+        modify the `cmd' variables in HWInterface.get_volume() and
+        HWInterface.set_volume() in order to do this."""
+        return vol
+        
     def get_volume(self):
         if not self.emulate:
             vol, mute = self.hw_interface.get_volume()
-            self.db.level = vol
+            self.db.level = self.correct_volume(vol, False)
             self.db.mute = 'True' if mute else 'False'
         return self.db.level, self.db.mute == 'True'
-        
+
     def set_volume(self, vol):
-        warn_level = int(self.db.warning_level)
-            
+        max_pct = int(self.db.max_pct)
+
         if vol < 0:
             vol = 0
-        elif vol > warn_level:
-            vol = warn_level
+        elif vol > max_pct:
+            vol = max_pct
+
+        vol = self.correct_volume(vol, True)
 
         if not self.emulate:
             self.hw_interface.set_volume(vol)
@@ -389,7 +450,8 @@ class VolumeController(ThreadPlus):
         quit = False
         quitters = {}
         for socket, cmd, val, msg in requests:
-            print "CMD: %s, VAL: %s" % (cmd, val)
+            if DEBUG:
+                print "PROCESSING CMD: \"%s\" (VAL: %s)" % (cmd, val)
             if cmd == 'get':
                 get = True
                 getters = self.add_socket(getters, socket)
@@ -453,15 +515,17 @@ class VolumeController(ThreadPlus):
     def run(self):
         # This is where we asynchronously parse and process commands
         # read from our input stream.  Note that although this is
-        # asynchronous with regard to the input stream it is synchronous
-        # with regard to our command stream.  IE, we only process the
-        # queue once any previous command has been completely processed.
-        while self.running:
-            requests = self.get_requests()
-            if requests and self.running:
-                #print "REQUESTS: %s" % (requests,)
-                self.process_requests(requests)
-
+        # asynchronous with regard to the input stream, the command
+        # stream is single-threaded.
+        try:
+            while self.running:
+                requests = self.get_requests()
+                if requests and self.running:
+                    #print "REQUESTS: %s" % (requests,)
+                    self.process_requests(requests)
+        except Termination:
+            print "TERMINATING"
+        
         if self.monitor:
             self.monitor.stop()
             self.monitor.join()
@@ -493,30 +557,44 @@ class VolumeServer(WebSocket):
         self.vc = SingleVolumeController()
         
     def received_message(self, message):
-        """For now, just do an echo."""
         if not message.is_binary:
             self.vc.process_message(self, message.data.strip())
-        #self.send(message.data, message.is_binary)
 
 
 if __name__ == '__main__':
     import optparse
     import os
-    
+    import signal
+
     parser = optparse.OptionParser()
-    parser.add_option("-p", "--port", type=int, dest="port", default=8888,
-                      help="Run volumed server using specified port")
+    parser.add_option(
+        "-p", "--port", type=int, dest="port", default=8888,
+        help="Run volumed server using specified port (default 888)")
     parser.add_option("-e", "--emulate",  dest="emulate",
                       action="store_true", help="Emulate the hw interface")
+    parser.add_option("-d", "--debug",  dest="debug", action="store_true",
+                      help="Provide some debugging output")
 
     (options, args) = parser.parse_args()
+    DEBUG = options.debug
     dirname = os.path.dirname(sys.argv[0])
     controller = SingleVolumeController(dirname, options)
 
     try:
         server = WSGIServer(('', 8888),
                             WebSocketWSGIApplication(handler_cls=VolumeServer))
+        def handleHup(signum, frame):
+            print 'SIGHUP received: taking no action...'
+
+        def handleTerm(signum, frame):
+            print 'SIGTERM received: closing down...'
+            server.stop()
+
+        signal.signal(signal.SIGHUP, handleHup)
+        signal.signal(signal.SIGTERM, handleTerm)
+    
         server.serve_forever()
     except KeyboardInterrupt: pass
+    except Termination: pass
     controller.stop()
     controller.join()
