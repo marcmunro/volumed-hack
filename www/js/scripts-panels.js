@@ -27,7 +27,6 @@
  */
 
 // TODO:
-//       - make volumed usage conditional on volumed functioning
 //       - migrate logarithmic stuff to volumed
 //       - make volumed a systemd service
 //       - 
@@ -144,20 +143,21 @@ jQuery(document).ready(function($) { 'use strict';
         // volume up/down/mute
         else if ($(this).hasClass('btn-volume')) {
 	    volEvent = '';
-	        
 	    var newVol;
 	    var volKnob = parseInt(SESSION.json['volknob']);
 	    
             if ($(this).attr('id') == 'volumedn' ||
 		$(this).attr('id') == 'volumedn-2')
 	    {
+		volEvent = 'change';
 		if (volKnob > 0) {
-		    sendVolumedCmd('vol ' + (volKnob - 1), SESSION);
+		    newVol = volKnob - 1
 		}
             }
 	    else if ($(this).attr('id') == 'volumeup' ||
 		     $(this).attr('id') == 'volumeup-2')
 	    {
+		volEvent = 'change';
 		if (volKnob < 100) {
 		    newVol = volKnob + 1;
 				
@@ -168,9 +168,6 @@ jQuery(document).ready(function($) { 'use strict';
 				SESSION.json['volwarning']);
 			$('#volumewarning-modal').modal();
 		    }
-		    else {
-			sendVolumedCmd('vol ' + newVol, SESSION);
-		    }
 	        }
             }
 	    else if ($(this).attr('id') == 'volumemute' ||
@@ -178,12 +175,38 @@ jQuery(document).ready(function($) { 'use strict';
 	    {
                 if (SESSION.json['volmute'] == '0') {
 		    setMute(SESSION, 'on');
-		    sendVolumedCmd('mute', SESSION);
-                } else {
-		    setMute(SESSION, 'off');
-		    sendVolumedCmd('unmute', SESSION);
+		    if (UI.volumedActive) {
+			sendVolumedCmd('mute', SESSION);
+		    }
+		    else {
+			setVolume(0, 'mute');
+		    }
                 }
+		else {
+		    setMute(SESSION, 'off');
+		    if (UI.volumedActive) {
+			sendVolumedCmd('unmute', SESSION);
+		    }
+		    else {
+			setVolume(volKnob, 'unmute');
+		    }
+                }
+		if (!UI.volumedActive) {
+		    var result = sendMoodeCmd(
+			'POST', 'updcfgengine',
+			{'volmute': SESSION.json['volmute']});
+		}
             }
+	    if ((volEvent == 'change') && (newVol != volKnob)) {
+		if (UI.volumedActive) {
+		    sendVolumedVol(newVol, SESSION);
+		}
+		else {
+		    setVolume(newVol, 'change');
+		    $('#volume').val(newVol)
+		    $('#volume-2').val(newVol)
+		}
+	    }
         }
 
         // toggle buttons, repeat, random, single, consume
@@ -268,7 +291,7 @@ jQuery(document).ready(function($) { 'use strict';
     // volume control knob
     $('.volumeknob').knob({
         change : function(value) {
-	    if (UI.marcsCode) {
+	    if (UI.volumedActive) {
 		this.showCv = true;
 		this.set_cv_from_av = false;
 		sendVolumedVol(value, SESSION, this);
@@ -309,8 +332,14 @@ jQuery(document).ready(function($) { 'use strict';
 		    this.set_cv_from_av = true;
 		    sendVolumedCmd('vol', SESSION, this);
 		}
+
+		if (!UI.volumedActive) {
+		    this.av = this.cv;
+		    this.set_cv_from_av = false;
+		    this.last_cv = false;
+		}
 		
-		if (this.av == this.cv) {
+		if ((this.av == this.cv) && UI.volumedActive) {
 		    this.$.attr('style', setStyleColor(style, '#eeeeee'));
 		}
 		else {

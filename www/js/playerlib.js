@@ -40,10 +40,10 @@ var UI = {
     playList: null,
     title: null,
     knob: null,
-    marcsCode: true,
     volumedActive: true,
     volumedLastVol: -1,
     webSocket: null,
+    webSocketTo: null,
     volControls: null,
     path: '',
 	bootTicker: '',
@@ -182,12 +182,20 @@ function sendVolumedCmd(cmd, session, volknob) {
 	websocket.onerror = function (error) {
 	    console.log("sendVoldCmd: WEBSOCKET ERROR: " + error);
 	    UI.volumedActive = false;
+	    if (UI.websocketTo == null) {
+		// Try again to establish the websocket in 5 seconds
+		UI.websocketTo = setTimeout(
+		    function () {
+			UI.websocketTo = null;
+			sendVolumedCmd(null, session);
+		    }, 5000);
+	    }
 	}
     }
     else {
 	websocket = UI.webSocket;
     }
-    if ((websocket.readyState == 1) && pending) {
+    if ((websocket.readyState == 1) && pending && cmd) {
 	pending = null;
 	websocket.send(cmd);
     }
