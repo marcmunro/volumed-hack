@@ -6,8 +6,11 @@ get a copy pf ws4py (git clone is good)
 copy ws4py to: /usr/local/lib/python2.7/site-packages
 
 Move the volumed.service file into /lib/systemd/system/volumed.service
+Move the volumec.service file into /lib/systemd/system/volumec.service
 
-Execute: systemctl enable volumed.service
+Execute:
+  # systemctl enable volumed.service
+  # systemctl enable volumec.service
 
 
 

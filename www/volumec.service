@@ -1,0 +1,14 @@
+[Unit]
+Description=Moode Audio lirc volume control server
+After=network.target
+
+[Service]
+ExecStart=/var/www/volumec.py -d -q
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+After=volumed.service
+Alias=volumec.service

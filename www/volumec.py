@@ -30,35 +30,115 @@
 import sys
 sys.path.append('/usr/local/lib/python2.7/site-packages')
 from ws4py.client.threadedclient import WebSocketClient
+import threading
 
 class VolumeClient(WebSocketClient):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, instream, options, *args, **kwargs):
         super(VolumeClient, self).__init__(*args, **kwargs)
-        self.more_expected = True
+        self.instream = instream
+        self.options = options
         self.expecting_response = False
-        
+        self._close_after_msg = False
+
     def closed(self, code, reason=None):
         if code != 1000:
             print "Closed down", code, reason
 
     def close_after_msg(self):
         if self.expecting_response:
-            self.more_expected = False
+            self._close_after_msg = True
         else:
             self.close()
             
+    def write(self, cmd):
+        self.sendcmd(cmd)
+        
     def sendcmd(self, cmd):
         self.expecting_response = True
+        if self.options.verbose:
+            print "TX: %s" % cmd.strip()
         self.send(cmd)
         
     def received_message(self, m):
-        print m.data.strip()
-        if not self.more_expected:
+        if not self.options.quiet:
+            print m.data.strip()
+        if self._close_after_msg:
             self.close()
         self.expecting_response = False
 
+
+class StreamTermination(Exception): pass
+
+class CommandStream:
+    def __init__(self, cmd):
+        self.cmd = cmd
+
+    def close(self): pass
+    
+    def readline(self):
+        cmd = self.cmd
+        self.cmd = None
+        return cmd
+
+class IRCmdStream:
+    """Provide a stream-like interface to the lirc subsystem.  This
+    allows us to fetch commands from infra-red controllers.
+
+    NOTE: There must be only one instance of this class as we rather
+    abuse the lirc.init() and lirc.deinit() functions."""
+
+    def __init__(self, name):
+        import lirc
+        self.name = name
+        self.lirc = lirc
+        self.sockid = lirc.init(name)
+
+    def __del__(self):
+        self.lirc.deinit()
+
+    def close(self):
+        self.lirc.deinit()
+        
+    def readline(self):
+        while True:
+            try:
+                list = self.lirc.nextcode()
+            except Exception:
+                raise StreamTermination(
+                    "volumec: Disconnected from lirc socket\n")
+            str = " ".join(list).strip()
+            if str != '':
+                return str
+
+
+class FileStream:
+    def __init__(self, filename, options):
+        self.filename = filename
+        self.options = options
+        if options.hold:
+            import stat, os
+            self.reopen = stat.S_ISFIFO(os.stat(options.file).st_mode)
+        else:
+            self.reopen = False
+        self.stream = open(options.file, "r")
+
+    def close(self):
+        self.stream.close()
+
+    def readline(self):
+        while True:
+            line = self.stream.readline
+            if line:
+                if (line == 'q\n') or (line == 'quit\n'):
+                    return None
+                return line
+            if self.reopen:
+                self.stream = open(options.file, "r")
+
+    
 if __name__ == '__main__':
     import optparse
+    import signal
     
     parser = optparse.OptionParser()
     parser.add_option("-H", "--host", dest="hostname", default='127.0.0.1',
@@ -71,6 +151,13 @@ if __name__ == '__main__':
                       help="Read commands from file (use - for stdin)")
     parser.add_option("-o", "--hold",  dest="hold", action="store_true",
                       help="If file is a pipe, hold it open continuously")
+    parser.add_option("-d", "--lirc",  "--daemon", dest="daemon",
+                      action="store_true",
+                      help="Run as an lirc client (daemon)")
+    parser.add_option("-v", "--verbose",  dest="verbose", action="store_true",
+                      help="Provide verbose output")
+    parser.add_option("-q", "--quiet",  dest="quiet", action="store_true",
+                      help="Do not print responses from volumed")
 
     (options, args) = parser.parse_args()
 
@@ -78,45 +165,89 @@ if __name__ == '__main__':
         sys.stderr.write("Unexpected args: %s\n" % " ".join(args))
         sys.exit(2)
 
-    try:
-        ws = VolumeClient('ws://%s:%d' % (options.hostname, options.port),
-                         protocols=['http-only', 'chat'])
-        ws.connect()
-        reopen = False
+    instream = None
+    if options.command:
+        # TODO: Check for conflicting options
+        instream = CommandStream(options.command)
+    elif options.daemon:
+        # TODO: Check for conflicting options
+        try:
+            instream = IRCmdStream("volumec")
+        except Exception as e:
+            sys.stderr.write(
+                ("volumec: Unable to connect with lirc daemon.\n    %s\n" +
+                 "Closing down.\n") % str(e))
+            sys.exit(2)
         
-        if options.command:
-            ws.sendcmd("%s\n" % options.command)
-            ws.close_after_msg()
-            ws.run_forever()
-            sys.exit(0)
+    elif options.file:
+        # TODO: Check for conflicting options
+        instream = open(options.file, "r")
+    else:
+        instream = sys.stdin
 
-        if options.file:
-            import stat, os
-            wstream = None
-            if stat.S_ISFIFO(os.stat(options.file).st_mode):
-                reopen = options.hold
-            stream = open(options.file, "r")
-        else:
-            stream = sys.stdin
+    sighup_received = False
+    sigterm_received = False
+    exitcode = 0
+    
+    def handleHup(signum, frame):
+        print 'SIGHUP received: taking no action...'
+        global sighup_received
+        sighup_received = True
+
+    def handleTerm(signum, frame):
+        print 'SIGTERM received: closing down...'
+        global sigterm_received
+        sigterm_received = True
+        instream.close()
+
+    signal.signal(signal.SIGHUP, handleHup)
+    signal.signal(signal.SIGTERM, handleTerm)
+        
+    ws = VolumeClient(instream, options,
+                      'ws://%s:%d' % (options.hostname, options.port),
+                      protocols=['http-only', 'chat'])
+
+    try:
+        ws.connect()
+    except Exception as e:
+        sys.stderr.write(
+            ("volumec: Unable to connect with volumed.\n    %s\n" +
+             "Closing down.\n") % str(e))
+        sys.exit(2)
+        
+    try:
         while True:
-            line = stream.readline()
-            if line:
-                if (line == 'q\n') or (line == 'quit\n'):
-                    ws.close()
-                    stream.close()
+            try:
+                msg = instream.readline()
+            except StreamTermination:
+                sys.stderr.write(
+                    "volumec: Disconnected from lirc socket\n")
+
+            except Exception as e:
+                if sighup_received:
+                    # Just try again
+                    sighup_received = False
+                    continue
+                ws.close()
+                if sigterm_received:
                     break
-                ws.sendcmd(line)
+                sys.stderr.write(
+                    "volumec: Error on input\n    %s\n" % str(e))
+                os.exit(2)
+            if msg:
+                try:
+                    ws.write(msg.strip() + "\n")
+                except Exception:
+                    sys.stderr.write(
+                        "volumec: Lost contact with volumed.  Closing down.\n")
+                    ws.close
+                    sys.exit(2)
             else:
-                # EOF detected
-                if reopen:
-                    stream = open(options.file, "r")
-                else:
-                    ws.close_after_msg()
-                    break
-        if options.file:
-            stream.close()
-                
+                break
+
+        ws.close_after_msg()
+        ws.run_forever()
     except KeyboardInterrupt:
         ws.close()
+        sys.exit(1)
 
-    ws.run_forever()

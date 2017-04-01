@@ -63,7 +63,7 @@ class Singleton(object):
 class ThreadPlus(threading.Thread):
     """Thread with added stop, sleep and sleep-target manipulation
     methods."""
-    RESOLUTION = 0.1
+    RESOLUTION = 0.3
 
     def __init__(self):
         super(ThreadPlus, self).__init__()
@@ -99,8 +99,7 @@ class ThreadPlus(threading.Thread):
                 return True
             
 class HWInterface:
-    """Provide an interface to the volume control hardware.  This also
-    records the volume and mute settings in the database."""
+    """Provide an interface to the volume control hardware."""
 
     def __init__(self, db):
         self.db = db
@@ -188,7 +187,7 @@ class HWInterface:
 
 
 class DB:
-    """Provide a nice simple setter/getter interface to the database
+    """Provide a simple setter/getter interface to the database
     fields."""
     
     STALE_LIMIT = 2.0
@@ -291,7 +290,6 @@ class VolumeController(ThreadPlus):
         self.mute_re = re.compile("^ *(Un)?Mute *$", re.IGNORECASE)
         self.quit_re = re.compile("^ *q(uit)? *$", re.IGNORECASE)
         self.watch_re = re.compile("^ *watch *$", re.IGNORECASE)
-        #self.shutdown_re = re.compile("^ *shutdown *$", re.IGNORECASE)
         self.watchers = {}
         self.watcher_lock = threading.Lock()
         self.start()
@@ -374,11 +372,16 @@ class VolumeController(ThreadPlus):
         for socket in sockets:
             if msg and self.running:
                 if DEBUG:
-                    print "SENDING MESSAGE: \"%s\"" % msg
+                    sys.stdout.write("SENDING MESSAGE: \"%s\"..." %
+                                     msg.strip())
                 try:
                     socket.send(msg)
+                    if DEBUG:
+                        print "SENT"
                 except Exception:
                     # Assume the socket was closed, not much we can do.
+                    if DEBUG:
+                        print ""
                     sys.stderr.write("Send failed.  Msg: \"%s\".\n" %
                                      msg.strip())
                     try:
