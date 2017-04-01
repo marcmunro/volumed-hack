@@ -21,10 +21,8 @@
 # service.  It either takes commands on the command line, or from an
 # input stream.  If the input stream is a named pipe, it can be
 # continually re-opened so that commands may simply be echoed to it.
-# This last feature is primarily for use for IR remote controls which
-# can use simple echo operations to pass on their actions.  This should
-# make the remotes much more responsive as commands will not end up
-# being queued while previous commands complete their execution.
+# Finally, volumec can run as a daemon wherein it acts as an lirc client
+# so that volume can be managed from infra-red remotes.
 #
 
 import sys
